@@ -23,6 +23,7 @@ class Exp_Informer(Exp_Basic):
         super(Exp_Informer, self).__init__(args)
     
     def _build_model(self):
+        print(locals())
         model_dict = {
             'informer':Informer,
             'informerstack':InformerStack,
@@ -53,6 +54,11 @@ class Exp_Informer(Exp_Basic):
                 self.device
             ).float()
         
+        if(self.args.pretrained_model_path!=None):
+            print("Loading checkpoint", self.args.pretrained_model_path)
+            checkpoint = torch.load(self.args.pretrained_model_path, map_location=self.device)
+            model.load_state_dict(checkpoint, strict=False)
+
         if self.args.use_multi_gpu and self.args.use_gpu:
             model = nn.DataParallel(model, device_ids=self.args.device_ids)
         return model

@@ -7,13 +7,26 @@ from models.encoder import Encoder, EncoderLayer, ConvLayer, EncoderStack
 from models.decoder import Decoder, DecoderLayer
 from models.attn import FullAttention, ProbAttention, AttentionLayer
 from models.embed import DataEmbedding
+from models.S3Layer import S3Layer
+
+class AdapterLayer(nn.Module):
+    def __init__(self, input_dim, adapter_dim):
+        super(AdapterLayer, self).__init__()
+        self.down_proj = nn.Linear(input_dim, adapter_dim)
+        self.activation = nn.ReLU()
+        self.up_proj = nn.Linear(adapter_dim, input_dim)
+
+    def forward(self, x):
+        return self.up_proj(self.activation(self.down_proj(x))) + x
 
 class Informer(nn.Module):
     def __init__(self, enc_in, dec_in, c_out, seq_len, label_len, out_len, 
                 factor=5, d_model=512, n_heads=8, e_layers=3, d_layers=2, d_ff=512, 
-                dropout=0.0, attn='prob', embed='fixed', freq='h', activation='gelu', 
+                dropout=0.0, attn='prob', embed='fixed', freq='h', activation='gelu',
                 output_attention = False, distil=True, mix=True,
-                device=torch.device('cuda:0')):
+                device=torch.device('cuda:0'),
+                num_segments=4, num_S3_stacks=1, consecutive_segment_num_ratio=0.5, shuffle_vector_dim=2, S3_kernel_size=3, enable_S3=1,
+                adapter_dim=64):
         super(Informer, self).__init__()
         self.pred_len = out_len
         self.attn = attn
@@ -25,6 +38,7 @@ class Informer(nn.Module):
         # Attention
         Attn = ProbAttention if attn=='prob' else FullAttention
         # Encoder
+        print(adapter_dim)
         self.encoder = Encoder(
             [
                 EncoderLayer(
@@ -33,7 +47,8 @@ class Informer(nn.Module):
                     d_model,
                     d_ff,
                     dropout=dropout,
-                    activation=activation
+                    activation=activation,
+                    adapter_layer=AdapterLayer(d_model, adapter_dim)
                 ) for l in range(e_layers)
             ],
             [
@@ -55,6 +70,7 @@ class Informer(nn.Module):
                     d_ff,
                     dropout=dropout,
                     activation=activation,
+                    adapter_layer=AdapterLayer(d_model, adapter_dim)
                 )
                 for l in range(d_layers)
             ],
@@ -64,8 +80,92 @@ class Informer(nn.Module):
         # self.end_conv2 = nn.Conv1d(in_channels=d_model, out_channels=c_out, kernel_size=1, bias=True)
         self.projection = nn.Linear(d_model, c_out, bias=True)
         
+        self.enable_S3 = int(enable_S3)
+        self.num_segments=num_segments
+        self.sample_num_to_truncate = 0
+        self.num_S3_stacks = num_S3_stacks
+        self.shuffle_vector_dim = shuffle_vector_dim
+        
+        # if self.enable_S3==1:
+        #     self.S3Layer_enc = S3Layer_channelwise(num_channels=self.in_dim, num_segments=self.num_segments, shuffle_vector_dim=self.shuffle_vector_dim, kernel_size=S3_kernel_size)
+        
+        # if self.enable_S3==1:
+        #     self.S3Layer_dec = S3Layer_channelwise(num_channels=self.in_dim, num_segments=self.num_segments, shuffle_vector_dim=self.shuffle_vector_dim, kernel_size=S3_kernel_size)
+
+        if self.enable_S3==1:
+            self.S3Layer_enc = S3Layer(num_segments=self.num_segments, shuffle_vector_dim=self.shuffle_vector_dim)
+        
+        if self.enable_S3==1:
+            self.S3Layer_dec = S3Layer(num_segments=self.num_segments, shuffle_vector_dim=self.shuffle_vector_dim)
+        self.freeze_pretrained_layers()
+
+    def freeze_pretrained_layers(self):
+        for param in self.enc_embedding.parameters():
+            param.requires_grad = False
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+        for param in self.dec_embedding.parameters():
+            param.requires_grad = False
+        for param in self.decoder.parameters():
+            param.requires_grad = False
+        for param in self.projection.parameters():
+            param.requires_grad = False
+        
     def forward(self, x_enc, x_mark_enc, x_dec, x_mark_dec, 
                 enc_self_mask=None, dec_self_mask=None, dec_enc_mask=None):
+        if self.enable_S3==1:
+            ###########################################################################
+            # Inject S3 layer
+            x_enc_copy = x_enc.clone().to(x_enc.device)
+
+            sample_num_to_truncate = 0
+            if(x_enc_copy.shape[1] % self.S3Layer_enc.num_segments!=0):
+                sample_num_to_truncate = x_enc_copy.shape[1] % self.S3Layer_enc.num_segments
+            if(sample_num_to_truncate!=0):
+                x_enc_copy = x_enc_copy[:, sample_num_to_truncate:, :]
+            
+            x_enc_copy = self.S3Layer_enc(x_enc_copy)
+            x_enc_copy = torch.cat([x_enc[:, 0:(x_enc.shape[1] - x_enc_copy.shape[1]), :], x_enc_copy], dim=1)
+            x_enc = x_enc_copy
+            ###########################################################################
+            x_dec_copy = x_dec.clone().to(x_dec.device)
+            # print(x_dec_copy.shape, x_dec.shape)
+
+            sample_num_to_truncate = 0
+            if(x_dec_copy.shape[1] % self.S3Layer_dec.num_segments!=0):
+                sample_num_to_truncate = x_dec_copy.shape[1] % self.S3Layer_dec.num_segments
+            if(sample_num_to_truncate!=0):
+                x_dec_copy = x_dec_copy[:, sample_num_to_truncate:, :]
+            # print(x_dec_copy.shape)
+            
+            x_dec_copy = self.S3Layer_dec(x_dec_copy)
+            x_dec_copy = torch.cat([x_dec[:, 0:(x_dec.shape[1] - x_dec_copy.shape[1]), :], x_dec_copy], dim=1)
+            x_dec = x_dec_copy
+            ###########################################################################
+            x_mark_enc_copy = x_mark_enc.clone().to(x_mark_enc.device)
+
+            sample_num_to_truncate = 0
+            if(x_mark_enc_copy.shape[1] % self.S3Layer_enc.num_segments!=0):
+                sample_num_to_truncate = x_mark_enc_copy.shape[1] % self.S3Layer_enc.num_segments
+            if(sample_num_to_truncate!=0):
+                x_mark_enc_copy = x_mark_enc_copy[:, sample_num_to_truncate:, :]
+            
+            x_mark_enc_copy = self.S3Layer_enc(x_mark_enc_copy)
+            x_mark_enc_copy = torch.cat([x_mark_enc[:, 0:(x_mark_enc.shape[1] - x_mark_enc_copy.shape[1]), :], x_mark_enc_copy], dim=1)
+            x_mark_enc = x_mark_enc_copy
+            ###########################################################################
+            x_mark_dec_copy = x_mark_dec.clone().to(x_mark_dec.device)
+
+            sample_num_to_truncate = 0
+            if(x_mark_dec_copy.shape[1] % self.S3Layer_dec.num_segments!=0):
+                sample_num_to_truncate = x_mark_dec_copy.shape[1] % self.S3Layer_dec.num_segments
+            if(sample_num_to_truncate!=0):
+                x_mark_dec_copy = x_mark_dec_copy[:, sample_num_to_truncate:, :]
+            
+            x_mark_dec_copy = self.S3Layer_dec(x_mark_dec_copy)
+            x_mark_dec_copy = torch.cat([x_mark_dec[:, 0:(x_mark_dec.shape[1] - x_mark_dec_copy.shape[1]), :], x_mark_dec_copy], dim=1)
+            x_mark_dec = x_mark_dec_copy
+            ###########################################################################
         enc_out = self.enc_embedding(x_enc, x_mark_enc)
         enc_out, attns = self.encoder(enc_out, attn_mask=enc_self_mask)
 

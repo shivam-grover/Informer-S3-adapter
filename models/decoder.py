@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 class DecoderLayer(nn.Module):
     def __init__(self, self_attention, cross_attention, d_model, d_ff=None,
-                 dropout=0.1, activation="relu"):
+                 dropout=0.1, activation="relu", adapter_layer=None):
         super(DecoderLayer, self).__init__()
         d_ff = d_ff or 4*d_model
         self.self_attention = self_attention
@@ -16,6 +16,8 @@ class DecoderLayer(nn.Module):
         self.norm3 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
         self.activation = F.relu if activation == "relu" else F.gelu
+        # Adapter layer
+        self.adapter_layer = adapter_layer
 
     def forward(self, x, cross, x_mask=None, cross_mask=None):
         x = x + self.dropout(self.self_attention(
@@ -29,9 +31,11 @@ class DecoderLayer(nn.Module):
             attn_mask=cross_mask
         )[0])
 
-        y = x = self.norm2(x)
+        x = self.norm2(x)
+        y = x = self.adapter_layer(x)
         y = self.dropout(self.activation(self.conv1(y.transpose(-1,1))))
         y = self.dropout(self.conv2(y).transpose(-1,1))
+        y = self.adapter_layer(y)
 
         return self.norm3(x+y)
 

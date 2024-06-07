@@ -24,7 +24,7 @@ class ConvLayer(nn.Module):
         return x
 
 class EncoderLayer(nn.Module):
-    def __init__(self, attention, d_model, d_ff=None, dropout=0.1, activation="relu"):
+    def __init__(self, attention, d_model, d_ff=None, dropout=0.1, activation="relu", adapter_layer=None):
         super(EncoderLayer, self).__init__()
         d_ff = d_ff or 4*d_model
         self.attention = attention
@@ -34,6 +34,8 @@ class EncoderLayer(nn.Module):
         self.norm2 = nn.LayerNorm(d_model)
         self.dropout = nn.Dropout(dropout)
         self.activation = F.relu if activation == "relu" else F.gelu
+        # Adapter layer
+        self.adapter_layer = adapter_layer
 
     def forward(self, x, attn_mask=None):
         # x [B, L, D]
@@ -47,9 +49,12 @@ class EncoderLayer(nn.Module):
         )
         x = x + self.dropout(new_x)
 
-        y = x = self.norm1(x)
+        x = self.norm1(x)
+        y = x = self.adapter_layer(x)
+
         y = self.dropout(self.activation(self.conv1(y.transpose(-1,1))))
         y = self.dropout(self.conv2(y).transpose(-1,1))
+        y = self.adapter_layer(y)
 
         return self.norm2(x+y), attn
 

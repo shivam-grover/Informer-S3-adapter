@@ -1,3 +1,4 @@
+pre_trained_model_path = "/content/Informer-S3-adapter/checkpoint.pth"
 import argparse
 import os
 import torch
@@ -57,6 +58,7 @@ parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
 parser.add_argument('--gpu', type=int, default=0, help='gpu')
 parser.add_argument('--use_multi_gpu', action='store_true', help='use multiple gpus', default=False)
 parser.add_argument('--devices', type=str, default='0,1,2,3',help='device ids of multile gpus')
+parser.add_argument('--pretrained_model_path', type=str, default='None')
 
 args = parser.parse_args()
 
